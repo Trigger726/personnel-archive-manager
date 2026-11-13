@@ -1,2 +1,9 @@
-# personnel-archive-manager
-Windows 人事档案管理工具的便携版发布仓库
+# 人事档案管理
+
+Windows 桌面便携工具，用于按员工批量核对、收集和复制档案。
+
+在 [Releases](../../releases/latest) 下载 Windows 便携包，完整解压后运行 `ArchiveManager.exe`。需要 Windows 和 .NET Framework 4.8 或更高版本。字体随包提供。
+
+首次打开时，在「设置」中选择档案根目录。默认按「部门 → 员工文件夹 → 档案」组织。点击「按清单收集」，勾选员工和所需资料，核对待确认项后将文件加入待复制。
+
+清单根据文件名匹配。请人工确认材料的内容和有效性。
