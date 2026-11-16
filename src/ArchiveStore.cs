@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Security;
 using System.Text;
+using System.Threading;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
@@ -139,7 +140,8 @@ namespace ArchiveManager
             return false;
         }
 
-        public static ArchiveIndex Scan(ArchiveSettings settings, Action<int> progress)
+        public static ArchiveIndex Scan(ArchiveSettings settings, Action<int> progress,
+            CancellationToken cancellation = default(CancellationToken))
         {
             var index = new ArchiveIndex();
             var pending = new Stack<Tuple<string, string[]>>();
@@ -148,6 +150,7 @@ namespace ArchiveManager
 
             while (pending.Count > 0)
             {
+                cancellation.ThrowIfCancellationRequested();
                 var directory = pending.Pop();
                 var entries = new List<ArchiveEntry>();
                 index.Contents.Add(directory.Item1, entries);
@@ -155,6 +158,7 @@ namespace ArchiveManager
                 {
                     foreach (var item in new DirectoryInfo(directory.Item1).EnumerateFileSystemInfos())
                     {
+                        cancellation.ThrowIfCancellationRequested();
                         try
                         {
                             bool isLink = (item.Attributes & FileAttributes.ReparsePoint) != 0;

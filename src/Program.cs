@@ -7,7 +7,7 @@ using System.Windows.Media;
 
 [assembly: AssemblyTitle("人事档案文件管理")]
 [assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.3.0.0")]
 [assembly: System.Runtime.Versioning.TargetFramework(".NETFramework,Version=v4.8")]
 
 namespace ArchiveManager

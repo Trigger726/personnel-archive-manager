@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
@@ -24,11 +24,10 @@ namespace ArchiveManager
         private static readonly Geometry FolderIcon = MakeIcon("M 1,4 L 7,4 L 9,6 L 15,6 L 15,13 L 1,13 Z M 1,7 L 15,7");
         private static readonly Geometry DocumentIcon = MakeIcon("M 3,1 L 10,1 L 14,5 L 14,15 L 3,15 Z M 10,1 L 10,5 L 14,5 M 6,8 L 11,8 M 6,11 L 11,11");
         private static readonly Geometry SearchIcon = MakeIcon("M 11,6 A 5,5 0 1 1 1,6 A 5,5 0 1 1 11,6 M 10,10 L 15,15");
-        private static readonly string[] MaterialKeywords =
-        {
-            "入职协议", "劳动合同", "入职登记表", "保密协议", "转正审批表", "岗位职责确认书",
-            "岗位调整通知书", "培训签到记录", "绩效考核记录", "考勤异常说明", "档案移交清单", "入职材料签收单"
-        };
+        private readonly MaterialKeywordCatalog keywordCatalog = new MaterialKeywordCatalog();
+        private readonly KeywordFolderScan keywordFolderScan = new KeywordFolderScan();
+        private List<MaterialKeywordSuggestion> keywordSuggestions = new List<MaterialKeywordSuggestion>();
+        private readonly HashSet<string> promptedKeywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly Grid surface;
         private readonly DataGrid filesGrid;
         private readonly TextBox searchBox;
@@ -167,8 +166,9 @@ namespace ArchiveManager
                 .Select(file => new FilterOption(file.EmployeePath, file.Employee + "　·　" + file.Department + "　·　" + file.EmployeePath))));
             Bind("FormatButton", () => ShowFilter("格式", formats, index.Files.Select(file => new FilterOption(file.Format, file.Format))));
             Bind("KeywordButton", () => ShowFilter("资料关键词", keywords,
-                MaterialKeywords.Select(word => new FilterOption(word, word)),
-                "按文件名匹配。选择多项时，命中任一关键词即可。", true));
+                KeywordOptions(),
+                "按文件名匹配。选择多项时，命中任一关键词即可。", true,
+                owner => ManageKeywords(owner).Select(word => new FilterOption(word, word))));
             Bind("UpButton", GoUp);
             Bind("SelectResultsButton", SelectResults);
             Bind("SelectedButton", ShowSelection);
@@ -264,6 +264,12 @@ namespace ArchiveManager
             Closing += (sender, args) => { if (copying) args.Cancel = true; };
             Loaded += async (sender, args) =>
             {
+                try { keywordCatalog.Load(); }
+                catch (Exception error)
+                {
+                    if (!ArchiveFiles.IsFileError(error)) throw;
+                    ShowError("无法读取资料关键词", error);
+                }
                 try { settings = ArchiveSettings.Load(); }
                 catch (Exception error)
                 {
@@ -457,6 +463,8 @@ namespace ArchiveManager
             {
                 folder = updated.Root;
                 index = new ArchiveIndex();
+                keywordSuggestions.Clear();
+                promptedKeywords.Clear();
                 employeeFiles = Enumerable.Empty<ArchiveEntry>().ToLookup(file => file.EmployeePath, StringComparer.OrdinalIgnoreCase);
                 selection.Clear();
                 selectionIssues.Clear();
@@ -481,22 +489,25 @@ namespace ArchiveManager
             SetProgress("正在读取档案目录…", true);
             UpdateControls();
             var report = new Progress<int>(count => { if (scanning) SetStatus("正在刷新，已读取 " + count + " 份文件…"); });
+            bool refreshedSuccessfully = false;
             try
             {
                 var selected = selection.Values.ToArray();
                 var refreshed = await Task.Run(() =>
                 {
                     var scanned = ArchiveIndex.Scan(settings, count => ((IProgress<int>)report).Report(count));
-                    return Tuple.Create(scanned, scanned.CheckSelectionAfterScan(selected));
+                    return Tuple.Create(scanned, scanned.CheckSelectionAfterScan(selected), keywordCatalog.Discover(scanned.Files));
                 });
                 index = refreshed.Item1;
                 selectionIssues = refreshed.Item2;
+                keywordSuggestions = refreshed.Item3;
                 lastRefresh = DateTime.Now;
                 foreach (var file in index.Files)
                     if (selection.ContainsKey(file.Path)) selection[file.Path] = file;
                 if (folder == null || !index.Contents.ContainsKey(folder)) folder = settings.Root;
                 RebuildTree();
                 SetStatus("已索引 " + index.Files.Count + " 份文件，刷新用时 " + timer.Elapsed.TotalSeconds.ToString("0.0") + " 秒");
+                refreshedSuccessfully = true;
             }
             catch (Exception error) { ShowError("刷新失败", error); SetStatus("刷新失败，可重试。"); }
             finally
@@ -504,6 +515,11 @@ namespace ArchiveManager
                 scanning = false;
                 progressBar.Visibility = Visibility.Collapsed;
                 UpdateView();
+            }
+            if (refreshedSuccessfully && IsVisible)
+            {
+                var newSuggestions = keywordSuggestions.Where(item => promptedKeywords.Add(item.Keyword)).ToList();
+                MaterialKeywordDialog.ReviewSuggestions(this, newSuggestions, SaveKeywords);
             }
         }
 
@@ -752,8 +768,9 @@ namespace ArchiveManager
         {
             bool available = !scanning && !copying;
             bool hasRoot = settings.Root.Length > 0;
-            foreach (var name in new[] { "SearchBox", "SearchButton", "ResetButton", "DepartmentButton", "EmployeeButton", "FormatButton", "KeywordButton", "ScopeBox", "RefreshButton", "CollectButton", "DirectoryTree", "FilesGrid" })
+            foreach (var name in new[] { "SearchBox", "SearchButton", "ResetButton", "DepartmentButton", "EmployeeButton", "FormatButton", "ScopeBox", "RefreshButton", "CollectButton", "DirectoryTree", "FilesGrid" })
                 Find<FrameworkElement>(name).IsEnabled = available && hasRoot;
+            Find<Button>("KeywordButton").IsEnabled = available;
             Find<Button>("SettingsButton").IsEnabled = available;
             Find<Button>("UpButton").IsEnabled = available && folder != null && !StringComparer.OrdinalIgnoreCase.Equals(folder, settings.Root);
             Find<Button>("SelectResultsButton").IsEnabled = available && visibleRows.Any(row => !row.IsFolder);
@@ -762,8 +779,10 @@ namespace ArchiveManager
             UpdateFilterButton("EmployeeButton", "员工", employees);
             UpdateFilterButton("FormatButton", "格式", formats);
             UpdateFilterButton("KeywordButton", "资料关键词", keywords);
-            Find<Button>("KeywordButton").ToolTip = keywords.Count == 0 ? "按入职协议、劳动合同等文件名关键词筛选" :
-                string.Join("、", MaterialKeywords.Where(keywords.Contains));
+            var keywordButton = Find<Button>("KeywordButton");
+            if (keywordSuggestions.Count > 0) keywordButton.Content += " · " + keywordSuggestions.Count + " 条建议";
+            keywordButton.ToolTip = keywords.Count == 0 ? "按文件名筛选，或管理资料关键词" :
+                string.Join("、", keywordCatalog.Keywords.Where(keywords.Contains));
             var summary = new List<string>();
             if (query.Length > 0) summary.Add("搜索：" + query);
             var groups = new[] { departments, employees, formats, keywords };
@@ -807,7 +826,7 @@ namespace ArchiveManager
         }
 
         private void ShowFilter(string label, HashSet<string> values, IEnumerable<FilterOption> options,
-            string description = null, bool keepOrder = false)
+            string description = null, bool keepOrder = false, Func<Window, IEnumerable<FilterOption>> manage = null)
         {
             var unique = options.GroupBy(option => option.Value, StringComparer.OrdinalIgnoreCase).Select(group => group.First());
             var all = (keepOrder ? unique : unique.OrderBy(option => option.Label, StringComparer.CurrentCultureIgnoreCase)).ToList();
@@ -829,7 +848,18 @@ namespace ArchiveManager
             list.ItemTemplate = template;
             body.Children.Add(list);
             dialog.ShowContent(body);
-            filter.TextChanged += (sender, args) => list.ItemsSource = all.Where(item => item.Label.IndexOf(filter.Text.Trim(), StringComparison.OrdinalIgnoreCase) >= 0).ToList();
+            Action refresh = () => list.ItemsSource = all.Where(item =>
+                item.Label.IndexOf(filter.Text.Trim(), StringComparison.OrdinalIgnoreCase) >= 0).ToList();
+            filter.TextChanged += (sender, args) => refresh();
+            if (manage != null)
+                dialog.AddButton("管理资料关键词", () =>
+                {
+                    var checkedValues = new HashSet<string>(all.Where(item => item.Checked).Select(item => item.Value),
+                        StringComparer.OrdinalIgnoreCase);
+                    all = manage(dialog).ToList();
+                    foreach (var option in all) option.Checked = checkedValues.Contains(option.Value);
+                    refresh();
+                });
             dialog.AddButton("清空筛选", () => { foreach (var option in all) option.Checked = false; });
             dialog.AddClose("取消");
             dialog.AddButton("应用筛选", () =>
@@ -841,6 +871,38 @@ namespace ArchiveManager
             }, true);
             dialog.Loaded += (sender, args) => filter.Focus();
             dialog.ShowDialog();
+        }
+
+        private IEnumerable<FilterOption> KeywordOptions()
+        {
+            return keywordCatalog.Keywords.Select(word => new FilterOption(word, word));
+        }
+
+        private string[] ManageKeywords(Window owner)
+        {
+            MaterialKeywordDialog.Manage(owner, keywordCatalog, () => keywordSuggestions.ToList(), SaveKeywords, keywordFolderScan);
+            return keywordCatalog.Keywords;
+        }
+
+        private bool SaveKeywords(Window owner, IEnumerable<string> add, IEnumerable<string> ignore)
+        {
+            var added = add.ToArray();
+            var ignored = ignore.ToArray();
+            try { keywordCatalog.SaveChanges(added, ignored); }
+            catch (Exception error)
+            {
+                if (!ArchiveFiles.IsFileError(error)) throw;
+                ShowError("无法保存资料关键词", error, owner);
+                return false;
+            }
+            var changed = new HashSet<string>(added.Concat(ignored), StringComparer.OrdinalIgnoreCase);
+            keywordSuggestions.RemoveAll(item => changed.Contains(item.Keyword));
+            var listed = new HashSet<string>(keywordCatalog.Keywords, StringComparer.OrdinalIgnoreCase);
+            if (clearedSearch != null)
+                clearedSearch.Filters[3] = clearedSearch.Filters[3].Where(listed.Contains).ToArray();
+            if (keywords.RemoveWhere(word => !listed.Contains(word)) > 0) UpdateView();
+            else UpdateControls();
+            return true;
         }
 
         private void UpdateSelectionStatus()
@@ -857,8 +919,8 @@ namespace ArchiveManager
         private void CollectMaterials()
         {
             string currentFolder = StringComparer.OrdinalIgnoreCase.Equals(folder, settings.Root) ? null : folder;
-            var files = CollectionDialog.Show(this, index, currentFolder, MaterialKeywords,
-                (file, owner) => Launch(file.Path, owner: owner));
+            var files = CollectionDialog.Show(this, index, currentFolder, keywordCatalog.Keywords,
+                (file, owner) => Launch(file.Path, owner: owner), ManageKeywords);
             if (files.Count > 0) AddToSelection(files);
         }
 

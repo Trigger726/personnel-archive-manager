@@ -1,5 +1,6 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
 using System.Windows;
@@ -13,12 +14,12 @@ namespace ArchiveManager
     internal static class CollectionDialog
     {
         public static IList<ArchiveEntry> Show(Window owner, ArchiveIndex index, string folder, string[] materials,
-            Action<ArchiveEntry, Window> openFile)
+            Action<ArchiveEntry, Window> openFile, Func<Window, string[]> manageKeywords)
         {
             var people = index.Contents.Values.SelectMany(entries => entries).Where(entry => entry.IsEmployeeFolder)
                 .OrderBy(entry => entry.Department).ThenBy(entry => entry.Employee)
                 .Select(entry => new Option(entry.EmployeePath.Replace("\\", " / "), entry)).ToList();
-            var documents = materials.Select(material => new Option(material)).ToList();
+            var documents = new ObservableCollection<Option>(materials.Select(material => new Option(material)));
             if (people.Count == 0)
             {
                 MessageBox.Show(owner, "当前索引里没有识别到员工文件夹。请检查设置中的员工层级并刷新。", "按清单收集",
@@ -42,15 +43,35 @@ namespace ArchiveManager
             var grid = new Grid();
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.45, GridUnitType.Star) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            var peoplePanel = Options("员工", people, true);
+            var peoplePanel = Options("员工", people, "部门、姓名或工号", "按部门、姓名或工号筛选员工");
             peoplePanel.Margin = new Thickness(0, 0, 14, 0);
             grid.Children.Add(peoplePanel);
-            var materialPanel = Options("需要的资料", documents, false);
+            var materialPanel = Options("需要的资料", documents, "搜索资料关键词", "搜索资料关键词");
             Grid.SetColumn(materialPanel, 1);
             grid.Children.Add(materialPanel);
             body.Children.Add(grid);
             dialog.ShowContent(body);
             dialog.AddClose("取消");
+            Action update = null;
+            PropertyChangedEventHandler documentChanged = (sender, args) => update();
+            dialog.AddButton("管理资料关键词", () =>
+            {
+                var available = manageKeywords(dialog);
+                var previouslyListed = new HashSet<string>(documents.Select(option => option.Label), StringComparer.OrdinalIgnoreCase);
+                var nowListed = new HashSet<string>(available, StringComparer.OrdinalIgnoreCase);
+                foreach (var removed in documents.Where(option => !nowListed.Contains(option.Label)).ToList())
+                {
+                    removed.PropertyChanged -= documentChanged;
+                    documents.Remove(removed);
+                }
+                foreach (var word in available.Where(word => !previouslyListed.Contains(word)))
+                {
+                    var option = new Option(word);
+                    option.PropertyChanged += documentChanged;
+                    documents.Add(option);
+                }
+                update();
+            });
             IList<ArchiveEntry> result = new ArchiveEntry[0];
             var check = dialog.AddButton("核对清单", () =>
             {
@@ -60,9 +81,9 @@ namespace ArchiveManager
                 if (result.Count > 0) dialog.Close();
             }, true);
             int employeeCount = people.Count(person => person.Checked);
-            int documentCount = documents.Count(document => document.Checked);
-            Action update = () =>
+            update = () =>
             {
+                int documentCount = documents.Count(document => document.Checked);
                 count.Text = employeeCount + " 名员工 × " + documentCount + " 种资料，共 " +
                     ((long)employeeCount * documentCount) + " 项";
                 check.IsEnabled = employeeCount > 0 && documentCount > 0;
@@ -70,19 +91,20 @@ namespace ArchiveManager
             foreach (var option in people)
                 option.PropertyChanged += (sender, args) => { employeeCount += option.Checked ? 1 : -1; update(); };
             foreach (var option in documents)
-                option.PropertyChanged += (sender, args) => { documentCount += option.Checked ? 1 : -1; update(); };
+                option.PropertyChanged += documentChanged;
             update();
             dialog.ShowDialog();
             return result;
         }
 
-        private static DockPanel Options(string title, IList<Option> options, bool searchable)
+        private static DockPanel Options(string title, IList<Option> options, string placeholder, string searchLabel)
         {
             var pane = new DockPanel();
             var label = new TextBlock { Text = title, FontWeight = FontWeights.Medium, Margin = new Thickness(0, 0, 0, 8) };
             DockPanel.SetDock(label, Dock.Top);
             pane.Children.Add(label);
-            var list = new ListBox { ItemsSource = options };
+            var view = CollectionViewSource.GetDefaultView(options);
+            var list = new ListBox { ItemsSource = view };
             list.SetResourceReference(Control.BorderBrushProperty, "Rule");
             var template = new DataTemplate();
             var checkBox = new FrameworkElementFactory(typeof(CheckBox));
@@ -91,23 +113,22 @@ namespace ArchiveManager
             checkBox.SetValue(FrameworkElement.MarginProperty, new Thickness(5, 5, 5, 5));
             template.VisualTree = checkBox;
             list.ItemTemplate = template;
-            if (searchable)
             {
                 var bar = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
                 var search = new TextBox { MinWidth = 105 };
-                AutomationProperties.SetName(search, "按部门、姓名或工号筛选员工");
-                search.ToolTip = "按部门、姓名或工号筛选员工";
+                AutomationProperties.SetName(search, searchLabel);
+                search.ToolTip = searchLabel;
                 var searchField = new Grid();
                 searchField.Children.Add(search);
                 var hint = new TextBlock
                 {
-                    Text = "部门、姓名或工号", IsHitTestVisible = false,
+                    Text = placeholder, IsHitTestVisible = false,
                     Margin = new Thickness(9, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center
                 };
                 hint.SetResourceReference(TextBlock.ForegroundProperty, "Muted");
                 searchField.Children.Add(hint);
                 var clear = Program.Button("清空", () => SetChecked(options, false));
-                var select = Program.Button("全选匹配", () => SetChecked((IEnumerable<Option>)list.ItemsSource, true));
+                var select = Program.Button("全选匹配", () => SetChecked(view.Cast<Option>(), true));
                 DockPanel.SetDock(clear, Dock.Right);
                 DockPanel.SetDock(select, Dock.Right);
                 bar.Children.Add(clear);
@@ -117,10 +138,13 @@ namespace ArchiveManager
                 {
                     hint.Visibility = search.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
                     var words = search.Text.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
-                    list.ItemsSource = options.Where(option => words.All(word =>
-                        option.Label.IndexOf(word, StringComparison.OrdinalIgnoreCase) >= 0)).ToList();
+                    view.Filter = item => words.All(word =>
+                        ((Option)item).Label.IndexOf(word, StringComparison.OrdinalIgnoreCase) >= 0);
                     select.IsEnabled = list.Items.Count > 0;
                 };
+                if (options is ObservableCollection<Option>)
+                    ((ObservableCollection<Option>)options).CollectionChanged +=
+                        (sender, args) => select.IsEnabled = !view.IsEmpty;
                 DockPanel.SetDock(bar, Dock.Top);
                 pane.Children.Add(bar);
             }
